@@ -21,6 +21,7 @@ omarchy plugin validate "$plugin_src"
 
 install -d "$plugin_dest"
 cp -a "$plugin_src/." "$plugin_dest/"
+find "$plugin_dest" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 chmod 0755 "$plugin_dest/snapkey"
 
 install -d "$data_home/applications"
@@ -30,6 +31,9 @@ install -m 0644 "$root/icon/snapkey.svg" "$data_home/icons/hicolor/scalable/apps
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$data_home/applications" >/dev/null 2>&1 || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -f -t "$data_home/icons/hicolor" >/dev/null 2>&1 || true
 fi
 
 # Ask the running shell to notice the new folder, then enable it. Enable has

@@ -25,13 +25,22 @@ default for that action; resetting puts the default back.
 
 ## Install
 
+One line:
+
 ```bash
-./bin/install
+curl -fsSL https://raw.githubusercontent.com/RobbieUK1/snapkey/main/install.sh | bash
 ```
 
-The script validates the plugin, copies it to
-`~/.config/omarchy/plugins/robbie.snapkey`, installs the apps-menu entry and
-icon, rescans the shell, and enables the plugin without adding a bar widget.
+That downloads the latest release snapshot, validates the plugin, copies it to
+`~/.config/omarchy/plugins/robbie.snapkey`, installs the **Snapkey** apps-menu
+entry and icon, rescans the shell, and enables the plugin without adding a bar
+widget.
+
+From a checkout:
+
+```bash
+./install.sh
+```
 
 Open **Snapkey** from the apps menu, or run:
 
@@ -94,7 +103,7 @@ The tests run the helper against a temporary `bindings.lua` and a fake
 ## Uninstall
 
 ```bash
-plugin/snapkey reset-all
+~/.config/omarchy/plugins/robbie.snapkey/snapkey reset-all
 omarchy plugin disable robbie.snapkey
 rm -rf ~/.config/omarchy/plugins/robbie.snapkey
 rm -f ~/.local/share/applications/snapkey.desktop
