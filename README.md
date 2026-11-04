@@ -81,7 +81,12 @@ written atomically, applied with `hyprctl reload`, checked with
 `hyprctl configerrors`, and rolled back automatically if Hyprland rejects it.
 
 The helper (`plugin/snapkey`) emits JSON for every command, so the UI can show
-errors without parsing prose:
+errors without parsing prose.
+
+Modifier order is normalized, so `Ctrl + Super + C` and `Super + Ctrl + C`
+refer to the same shortcut when checking conflicts. If the managed block has
+missing, duplicate, or misplaced markers, Snapkey reports an error and leaves
+the file untouched; repair the markers before trying again.
 
 ```bash
 plugin/snapkey status
@@ -99,6 +104,7 @@ plugin/snapkey reset-all
 
 The tests run the helper against a temporary `bindings.lua` and a fake
 `hyprctl`; they never touch the live Hyprland configuration.
+GitHub Actions runs them on Python 3.10 and 3.14, along with shell syntax checks.
 
 ## Uninstall
 

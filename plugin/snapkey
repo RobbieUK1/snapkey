@@ -243,7 +243,8 @@ def normalize_chord(chord: str) -> str:
     else:
         raise ValueError(f"That key cannot be bound: {key}")
 
-    return " + ".join([*modifiers, key])
+    ordered = [modifier for modifier in ("SUPER", "SHIFT", "CTRL", "ALT") if modifier in modifiers]
+    return " + ".join([*ordered, key])
 
 
 def read_bindings() -> str:
@@ -259,10 +260,13 @@ def split_managed_block(text: str) -> tuple[list[str], int, int] | None:
     start = end = None
     for index, line in enumerate(lines):
         if line.strip() == BEGIN:
+            if start is not None:
+                raise ValueError("bindings.lua contains duplicate Snapkey start markers")
             start = index
-        elif line.strip() == END and start is not None:
+        elif line.strip() == END:
+            if start is None or end is not None:
+                raise ValueError("bindings.lua contains an unexpected Snapkey end marker")
             end = index
-            break
     if start is None:
         return None
     if end is None:

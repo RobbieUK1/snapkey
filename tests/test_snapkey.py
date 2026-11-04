@@ -230,6 +230,50 @@ class SnapkeyTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ reset
 
+    def test_modifier_order_is_canonical_and_set_is_idempotent(self) -> None:
+        code, payload, _, _ = self.run_helper("set", "region", "alt+ctrl+shift+super+c")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.actions_by_id(payload)["region"]["chord"],
+                         "SUPER + SHIFT + CTRL + ALT + C")
+        code, payload, _, _ = self.run_helper("set", "region", "super+shift+ctrl+alt+c")
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["changed"])
+
+    def test_check_matches_live_binding_with_reordered_modifiers(self) -> None:
+        code, payload, _, _ = self.run_helper("check", "region", "ctrl+super+c")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["conflict"], {"kind": "binding", "label": "Capture menu"})
+
+    def test_reordered_modifiers_cannot_bypass_managed_conflict(self) -> None:
+        # Include a hand-edited chord written before canonical ordering existed.
+        original = ('-- Snapkey: screenshot keys (start)\n'
+                    'o.rebind("CTRL + SUPER + S", "Snapkey: Region", '
+                    '"omarchy capture screenshot region")\n'
+                    '-- Snapkey: screenshot keys (end)\n')
+        self.bindings.write_text(original, encoding="utf-8")
+        code, payload, _, _ = self.run_helper("check", "window", "SUPER + CTRL + S")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["conflict"], {"kind": "snapkey", "label": "Region"})
+        code, payload, _, _ = self.run_helper("set", "window", "SUPER + CTRL + S")
+        self.assertEqual(code, 1)
+        self.assertIn("already assigned to Region", payload["error"])
+        self.assertEqual(self.bindings.read_text(encoding="utf-8"), original)
+
+    def test_malformed_blocks_are_never_rewritten(self) -> None:
+        begin = "-- Snapkey: screenshot keys (start)\n"
+        end = "-- Snapkey: screenshot keys (end)\n"
+        for markers in (begin, end, end + begin, begin + begin + end,
+                        begin + end + end, begin + end + begin + end):
+            for command in (("set", "region", "PRINT"), ("reset", "region"), ("reset-all",)):
+                with self.subTest(markers=markers, command=command):
+                    original = "-- personal bindings\n" + markers
+                    self.bindings.write_text(original, encoding="utf-8")
+                    code, payload, _, _ = self.run_helper(*command)
+                    self.assertEqual(code, 1)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(self.bindings.read_text(encoding="utf-8"), original)
+                    self.assertFalse(self.bindings.with_name("bindings.lua.bak.snapkey").exists())
+
     def test_reset_restores_original_file(self) -> None:
         original = (
             "-- personal bindings\n"
