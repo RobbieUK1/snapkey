@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Snapkey
+GenericName=Screenshot key bindings
+Comment=Assign keys to Omarchy's screenshot actions
+Exec=omarchy-shell shell summon robbie.snapkey '{}'
+TryExec=omarchy-shell
+Icon=snapkey
+Terminal=false
+Categories=Settings;Utility;
+Keywords=screenshot;keybinding;keybind;hotkey;shortcut;capture;region;ocr;
+StartupNotify=false

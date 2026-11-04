@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "robbie.snapkey",
+  "name": "Snapkey",
+  "version": "1.0.0",
+  "author": "Robbie",
+  "license": "MIT",
+  "description": "Assign a key or key combination to each of Omarchy's screenshot actions. Opens from the apps menu; there is no bar icon.",
+  "kinds": [
+    "panel"
+  ],
+  "entryPoints": {
+    "panel": "Snapkey.qml"
+  }
+}

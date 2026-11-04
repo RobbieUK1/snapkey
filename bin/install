@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Install Snapkey: the shell plugin, the apps-menu entry, and the icon.
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+plugin_src="$root/plugin"
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+plugin_dest="$config_home/omarchy/plugins/robbie.snapkey"
+
+if ! command -v omarchy >/dev/null 2>&1; then
+  echo "install: omarchy is not on PATH" >&2
+  exit 1
+fi
+if ! command -v omarchy-shell >/dev/null 2>&1; then
+  echo "install: omarchy-shell is not on PATH" >&2
+  exit 1
+fi
+
+omarchy plugin validate "$plugin_src"
+
+install -d "$plugin_dest"
+cp -a "$plugin_src/." "$plugin_dest/"
+chmod 0755 "$plugin_dest/snapkey"
+
+install -d "$data_home/applications"
+install -d "$data_home/icons/hicolor/scalable/apps"
+install -m 0644 "$root/snapkey.desktop" "$data_home/applications/snapkey.desktop"
+install -m 0644 "$root/icon/snapkey.svg" "$data_home/icons/hicolor/scalable/apps/snapkey.svg"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$data_home/applications" >/dev/null 2>&1 || true
+fi
+
+# Ask the running shell to notice the new folder, then enable it. Enable has
+# no placement argument, so no widget is added to the bar.
+omarchy-shell -q shell rescanPlugins || true
+omarchy plugin enable robbie.snapkey
+
+echo "Installed Snapkey."
+echo "Open it from the apps menu, or run:"
+echo "  omarchy-shell shell summon robbie.snapkey '{}'"

@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+"""Snapkey's backend: read and write Omarchy's screenshot key bindings.
+
+Every command prints one JSON object on stdout. The actual bindings live in a
+managed block at the end of ~/.config/hypr/bindings.lua, so the app never owns
+the whole file and a reset puts Omarchy's defaults back by deleting the block.
+
+Set SNAPKEY_BINDINGS or SNAPKEY_HYPRCTL to point the tests at a temporary file
+and a fake hyprctl.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+BEGIN = "-- Snapkey: screenshot keys (start)"
+END = "-- Snapkey: screenshot keys (end)"
+PREFIX = "Snapkey: "
+
+ACTIONS = [
+    {
+        "id": "smart",
+        "label": "Smart screenshot",
+        "command": "omarchy capture screenshot smart",
+        "section": "screenshots",
+        "defaults": [
+            {"chord": "PRINT", "description": "Screenshot"},
+            {"chord": "SUPER + CTRL + ALT + C", "description": "Screenshot"},
+        ],
+    },
+    {
+        "id": "region",
+        "label": "Region",
+        "command": "omarchy capture screenshot region",
+        "section": "screenshots",
+        "defaults": [],
+    },
+    {
+        "id": "window",
+        "label": "Window",
+        "command": "omarchy capture screenshot windows",
+        "section": "screenshots",
+        "defaults": [],
+    },
+    {
+        "id": "fullscreen",
+        "label": "Full screen",
+        "command": "omarchy capture screenshot fullscreen",
+        "section": "screenshots",
+        "defaults": [],
+    },
+    {
+        "id": "fullscreen-save",
+        "label": "Full screen (save)",
+        "command": "omarchy capture screenshot fullscreen save",
+        "section": "screenshots",
+        "defaults": [],
+    },
+    {
+        "id": "scroll",
+        "label": "Scrolling region",
+        "command": "omarchy capture screenshot scroll",
+        "section": "screenshots",
+        "defaults": [],
+    },
+    {
+        "id": "text",
+        "label": "Text (OCR)",
+        "command": "omarchy capture text",
+        "section": "more",
+        "defaults": [
+            {
+                "chord": "SUPER + CTRL + PRINT",
+                "description": "Extract text (OCR) from screenshot",
+            }
+        ],
+    },
+    {
+        "id": "qr",
+        "label": "QR code",
+        "command": "omarchy capture qr",
+        "section": "more",
+        "defaults": [],
+    },
+    {
+        "id": "menu",
+        "label": "Capture menu",
+        "command": "omarchy menu toggle capture",
+        "section": "more",
+        "defaults": [{"chord": "SUPER + CTRL + C", "description": "Capture menu"}],
+    },
+]
+
+ACTION_BY_ID = {action["id"]: action for action in ACTIONS}
+ACTION_BY_LABEL = {action["label"]: action for action in ACTIONS}
+
+# Hyprland reports modifiers as a bitmask. Its key names are xkbcommon keysym
+# names: letters and function keys are uppercase, punctuation is lowercase.
+MOD_SUPER = 1 << 6
+MOD_CTRL = 1 << 2
+MOD_ALT = 1 << 3
+MOD_SHIFT = 1 << 0
+
+NAMED_KEYS = {
+    "PRINT",
+    "SPACE",
+    "TAB",
+    "RETURN",
+    "ESCAPE",
+    "BACKSPACE",
+    "DELETE",
+    "INSERT",
+    "HOME",
+    "END",
+    "PAGE_UP",
+    "PAGE_DOWN",
+    "LEFT",
+    "RIGHT",
+    "UP",
+    "DOWN",
+    "PAUSE",
+    "SCROLL_LOCK",
+    "CAPS_LOCK",
+    "NUM_LOCK",
+    "MENU",
+    "SYSREQ",
+}
+PUNCTUATION_KEYS = {
+    "comma",
+    "period",
+    "slash",
+    "backslash",
+    "minus",
+    "equal",
+    "bracketleft",
+    "bracketright",
+    "semicolon",
+    "apostrophe",
+    "grave",
+}
+MODIFIERS = {"SUPER", "SHIFT", "CTRL", "ALT"}
+LINE_RE = re.compile(r'^\s*o\.(?:re)?bind\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"(.*)"\s*\)\s*$')
+
+
+def bindings_path() -> Path:
+    override = os.environ.get("SNAPKEY_BINDINGS")
+    if override:
+        return Path(override)
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(config_home) / "hypr" / "bindings.lua"
+
+
+def hyprctl_path() -> str | None:
+    override = os.environ.get("SNAPKEY_HYPRCTL")
+    if override:
+        return override
+    return shutil.which("hyprctl")
+
+
+def run_hyprctl(*args: str) -> tuple[int, str, str]:
+    executable = hyprctl_path()
+    if not executable:
+        return 127, "", "hyprctl is not available"
+    try:
+        process = subprocess.run(
+            [executable, *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return 1, "", str(error)
+    return process.returncode, process.stdout, process.stderr
+
+
+def chord_from_hypr(modmask: int, key: str) -> str:
+    parts = []
+    if modmask & MOD_SUPER:
+        parts.append("SUPER")
+    if modmask & MOD_SHIFT:
+        parts.append("SHIFT")
+    if modmask & MOD_CTRL:
+        parts.append("CTRL")
+    if modmask & MOD_ALT:
+        parts.append("ALT")
+
+    key = str(key or "")
+    if len(key) == 1 and key.isalpha():
+        key = key.upper()
+    elif key.startswith("XF86"):
+        pass
+    elif key.startswith("code:"):
+        pass
+    elif key in PUNCTUATION_KEYS:
+        pass
+    else:
+        key = key.upper()
+    parts.append(key)
+    return " + ".join(parts)
+
+
+def normalize_chord(chord: str) -> str:
+    """Return the canonical spelling, or raise ValueError for unsafe input."""
+    raw = str(chord or "").strip()
+    if not raw or len(raw) > 80:
+        raise ValueError("Enter a key or a key combination")
+
+    tokens = [token.strip() for token in raw.split("+")]
+    if any(not token for token in tokens):
+        raise ValueError("Enter a key or a key combination")
+
+    key = tokens[-1]
+    modifiers = [token.upper() for token in tokens[:-1]]
+    if len(set(modifiers)) != len(modifiers):
+        raise ValueError("That combination repeats a modifier")
+    for modifier in modifiers:
+        if modifier not in MODIFIERS:
+            raise ValueError(f"Unknown modifier: {modifier}")
+
+    if key.upper() in NAMED_KEYS:
+        key = key.upper()
+    elif re.fullmatch(r"[A-Za-z]", key):
+        key = key.upper()
+    elif re.fullmatch(r"[0-9]", key):
+        pass
+    elif re.fullmatch(r"[Ff]([1-9]|1[0-9]|2[0-4])", key):
+        key = "F" + key[1:]
+    elif key in PUNCTUATION_KEYS:
+        pass
+    elif re.fullmatch(r"XF86[A-Za-z0-9_]+", key):
+        pass
+    elif re.fullmatch(r"code:[0-9]+", key):
+        pass
+    else:
+        raise ValueError(f"That key cannot be bound: {key}")
+
+    return " + ".join([*modifiers, key])
+
+
+def read_bindings() -> str:
+    path = bindings_path()
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def split_managed_block(text: str) -> tuple[list[str], int, int] | None:
+    lines = text.splitlines(keepends=True)
+    start = end = None
+    for index, line in enumerate(lines):
+        if line.strip() == BEGIN:
+            start = index
+        elif line.strip() == END and start is not None:
+            end = index
+            break
+    if start is None:
+        return None
+    if end is None:
+        raise ValueError("The Snapkey block in bindings.lua has no end marker")
+    return lines, start, end
+
+
+def parse_managed_chords(text: str) -> dict[str, str]:
+    block = split_managed_block(text)
+    if not block:
+        return {}
+    lines, start, end = block
+    chords: dict[str, str] = {}
+    for line in lines[start + 1 : end]:
+        match = LINE_RE.match(line)
+        if not match:
+            continue
+        chord, description = match.group(1), match.group(2)
+        if not description.startswith(PREFIX):
+            continue
+        label = description[len(PREFIX) :]
+        if label not in ACTION_BY_LABEL:
+            continue
+        try:
+            chords[label] = normalize_chord(chord)
+        except ValueError:
+            # A hand-edited bad chord should not stop the whole status report.
+            continue
+    return chords
+
+
+def build_block(chords: dict[str, str]) -> str | None:
+    managed = [action for action in ACTIONS if action["label"] in chords]
+    if not managed:
+        return None
+    lines = [
+        BEGIN,
+        "-- Managed by Snapkey. Change these in Snapkey; edits here are replaced.",
+    ]
+    for action in managed:
+        label = action["label"]
+        lines.append(
+            f'o.rebind("{chords[label]}", "{PREFIX}{label}", "{action["command"]}")'
+        )
+    lines.append(END)
+    return "\n".join(lines) + "\n"
+
+
+def replace_managed_block(text: str, block: str | None) -> str:
+    found = split_managed_block(text)
+    if found:
+        lines, start, end = found
+        if block is None:
+            remove_from = start
+            if remove_from > 0 and lines[remove_from - 1].strip() == "":
+                remove_from -= 1
+            return "".join(lines[:remove_from]) + "".join(lines[end + 1 :])
+        return "".join(lines[:start]) + block + "".join(lines[end + 1 :])
+
+    if block is None:
+        return text
+    if not text or text.endswith("\n\n"):
+        separator = ""
+    elif text.endswith("\n"):
+        separator = "\n"
+    else:
+        separator = "\n\n"
+    return text + separator + block
+
+
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o644
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.snapkey-", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def backup_once(path: Path) -> None:
+    if not path.exists():
+        return
+    backup = path.with_name(path.name + ".bak.snapkey")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+
+
+def reload_hyprland() -> str | None:
+    """Return an error message, or None when Hyprland accepted the config."""
+    if not hyprctl_path():
+        return None
+    code, _, error = run_hyprctl("reload")
+    if code != 0:
+        return error.strip() or f"hyprctl reload exited with {code}"
+    code, output, error = run_hyprctl("configerrors")
+    if code != 0:
+        return error.strip() or f"hyprctl configerrors exited with {code}"
+    errors = output.strip()
+    return errors or None
+
+
+def restore_bindings(path: Path, original: str | None) -> None:
+    if original is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    else:
+        atomic_write(path, original)
+
+
+def effective_bindings() -> list[dict[str, str]] | None:
+    if not hyprctl_path():
+        return None
+    code, output, _ = run_hyprctl("-j", "binds")
+    if code != 0:
+        return None
+    try:
+        raw = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, list):
+        return None
+
+    bindings = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        bindings.append(
+            {
+                "chord": chord_from_hypr(int(item.get("modmask") or 0), str(item.get("key") or "")),
+                "description": str(item.get("description") or ""),
+            }
+        )
+    return bindings
+
+
+def action_status(action: dict, bindings: list[dict[str, str]] | None) -> dict:
+    text = read_bindings()
+    managed = parse_managed_chords(text)
+    label = action["label"]
+    custom = managed.get(label)
+
+    if custom:
+        return {**public_action(action), "chord": custom, "source": "custom"}
+
+    for default in action["defaults"]:
+        chord = normalize_chord(default["chord"])
+        if bindings is None:
+            return {**public_action(action), "chord": chord, "source": "default"}
+        if any(
+            binding["chord"] == chord
+            and binding["description"] == default["description"]
+            for binding in bindings
+        ):
+            return {**public_action(action), "chord": chord, "source": "default"}
+
+    return {**public_action(action), "chord": "", "source": ""}
+
+
+def public_action(action: dict) -> dict:
+    return {
+        "id": action["id"],
+        "label": action["label"],
+        "command": action["command"],
+        "section": action["section"],
+    }
+
+
+def status() -> dict:
+    bindings = effective_bindings()
+    return {
+        "ok": True,
+        "bindingsPath": str(bindings_path()),
+        "hyprland": bindings is not None,
+        "actions": [action_status(action, bindings) for action in ACTIONS],
+    }
+
+
+def action_for_id(action_id: str) -> dict:
+    action = ACTION_BY_ID.get(action_id)
+    if not action:
+        raise ValueError(f"Unknown action: {action_id}")
+    return action
+
+
+def chord_conflict(action: dict, chord: str) -> dict | None:
+    text = read_bindings()
+    managed = parse_managed_chords(text)
+    for label, managed_chord in managed.items():
+        if label != action["label"] and managed_chord == chord:
+            return {"kind": "snapkey", "label": label}
+
+    bindings = effective_bindings()
+    if bindings is None:
+        return None
+
+    allowed = {PREFIX + action["label"]}
+    for default in action["defaults"]:
+        if normalize_chord(default["chord"]) == chord:
+            allowed.add(default["description"])
+
+    for binding in bindings:
+        if binding["chord"] != chord:
+            continue
+        if binding["description"] in allowed:
+            continue
+        description = binding["description"]
+        if description.startswith(PREFIX):
+            return {"kind": "snapkey", "label": description[len(PREFIX) :]}
+        return {
+            "kind": "binding",
+            "label": description or "an unnamed binding",
+        }
+    return None
+
+
+def write_chords(chords: dict[str, str]) -> bool:
+    path = bindings_path()
+    original_text = read_bindings() if path.exists() else None
+    original = original_text
+    block = build_block(chords)
+    updated = replace_managed_block(original or "", block)
+    if updated == (original or ""):
+        return False
+
+    backup_once(path)
+    atomic_write(path, updated)
+    error = reload_hyprland()
+    if error:
+        restore_bindings(path, original)
+        reload_hyprland()
+        raise RuntimeError(f"Hyprland rejected the change: {error}")
+    return True
+
+
+def command_status(_: list[str]) -> dict:
+    return status()
+
+
+def command_check(args: list[str]) -> dict:
+    if len(args) != 2:
+        raise ValueError("Usage: snapkey check <action> <chord>")
+    action = action_for_id(args[0])
+    chord = normalize_chord(args[1])
+    return {"ok": True, "chord": chord, "conflict": chord_conflict(action, chord)}
+
+
+def command_set(args: list[str]) -> dict:
+    if len(args) != 2:
+        raise ValueError("Usage: snapkey set <action> <chord>")
+    action = action_for_id(args[0])
+    chord = normalize_chord(args[1])
+    conflict = chord_conflict(action, chord)
+    if conflict and conflict["kind"] == "snapkey":
+        raise ValueError(f"{chord} is already assigned to {conflict['label']}")
+
+    text = read_bindings()
+    chords = parse_managed_chords(text)
+    chords[action["label"]] = chord
+    changed = write_chords(chords)
+    result = status()
+    result["changed"] = changed
+    result["replaced"] = conflict["label"] if conflict else ""
+    return result
+
+
+def command_reset(args: list[str]) -> dict:
+    if len(args) != 1:
+        raise ValueError("Usage: snapkey reset <action>")
+    action = action_for_id(args[0])
+    chords = parse_managed_chords(read_bindings())
+    chords.pop(action["label"], None)
+    changed = write_chords(chords)
+    result = status()
+    result["changed"] = changed
+    return result
+
+
+def command_reset_all(_: list[str]) -> dict:
+    changed = write_chords({})
+    result = status()
+    result["changed"] = changed
+    return result
+
+
+COMMANDS = {
+    "status": command_status,
+    "check": command_check,
+    "set": command_set,
+    "reset": command_reset,
+    "reset-all": command_reset_all,
+}
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[1] not in COMMANDS:
+        print(json.dumps({"ok": False, "error": "Usage: snapkey status|check|set|reset|reset-all"}))
+        return 2
+    try:
+        result = COMMANDS[argv[1]](argv[2:])
+    except Exception as error:  # Report every failure as JSON for the QML side.
+        print(json.dumps({"ok": False, "error": str(error)}))
+        return 1
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
